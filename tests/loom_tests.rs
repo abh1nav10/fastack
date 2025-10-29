@@ -13,7 +13,7 @@ mod loom_tests {
             let cloned2 = Arc::clone(&new);
             new.insert_from_head(5);
             let t1 = loom::thread::spawn(move || {
-                cloned1.insert_from_head(2);
+                cloned1.insert_from_head(7);
             });
             let t2 = loom::thread::spawn(move || {
                 let _ = cloned2.delete_from_tail();

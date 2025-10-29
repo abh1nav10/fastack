@@ -30,7 +30,6 @@ pub(crate) struct Descriptor<T> {
     current: *mut Node<T>, // newest change to solve the biggest problems
     success: AtomicBool,
     next: *mut Node<T>,
-    status: AtomicUsize,
     pending: AtomicBool,
     op: Operation,
     deleter: &'static dyn Deleter,
@@ -91,7 +90,6 @@ impl<T> Descriptor<T> {
         current: *mut Node<T>,
         success: AtomicBool,
         next: *mut Node<T>,
-        status: AtomicUsize,
         pending: AtomicBool,
         op: Operation,
         deleter: &'static dyn Deleter,
@@ -103,7 +101,6 @@ impl<T> Descriptor<T> {
             current,
             success,
             next,
-            status,
             pending,
             op,
             deleter,
@@ -116,6 +113,7 @@ impl<T> Descriptor<T> {
 
 impl<T> LinkedList<T> {
     pub(crate) fn insert(&self, next: *mut Node<T>) {
+        println!("Initiating insert, {:?}", std::thread::current().id());
         loop {
             let mut current_node_holder = HazPtrHolder::default();
             let mut current_node_guard = unsafe { current_node_holder.load(&self.head) };
@@ -129,7 +127,6 @@ impl<T> LinkedList<T> {
                 current_node,
                 AtomicBool::new(false),
                 next,
-                AtomicUsize::new(0),
                 AtomicBool::new(true),
                 Operation::Insert,
                 &DELETER1,
@@ -155,7 +152,7 @@ impl<T> LinkedList<T> {
                     let atomicptr = AtomicPtr::new(new_descriptor);
                     let mut new_descriptor_guard = unsafe {
                         new_descriptor_holder
-                            .load(&atomicptr) // fine to load it into a new ptr
+                            .load(&atomicptr) // fine to load it into a new atomic ptr
                             .expect("Has to be there")
                     };
                     if !unsafe { (*thing.data).pending.load(Ordering::SeqCst) } {
@@ -208,6 +205,7 @@ impl<T> LinkedList<T> {
                                 std::mem::drop(new_descriptor_guard);
                                 std::mem::drop(current_node_guard);
                                 HazPtrHolder::try_reclaim();
+                                //println!("before returning");
                                 return;
                             } else {
                                 std::mem::drop(pending_holder_guard);
@@ -317,11 +315,6 @@ impl<T> LinkedList<T> {
                     .pending
                     .store(false, Ordering::SeqCst);
             }
-            unsafe {
-                (*actual_descriptor_guard.data)
-                    .status
-                    .store(1, Ordering::SeqCst);
-            }
             return;
         }
         let mut next_ptr_holder = HazPtrHolder::default();
@@ -347,38 +340,25 @@ impl<T> LinkedList<T> {
             std::ptr::null_mut()
         };
         let pending = unsafe { &(*actual_descriptor_guard.data).pending };
-        let status = unsafe { &(*actual_descriptor_guard.data).status };
         loop {
+            //println!("Entering the loop_insert loop");
             match pending.load(Ordering::SeqCst) {
-                true => match status.load(Ordering::SeqCst) {
-                    1 => {
-                        Self::insert_head(next, current);
-                        head_ptr.compare_exchange(
-                            current,
-                            next,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        );
+                true => {
+                    let now = head_ptr.load(Ordering::SeqCst);
+                    if now != current {
                         pending.store(false, Ordering::SeqCst);
                         return;
                     }
-                    0 => {
-                        let now = head_ptr.load(Ordering::SeqCst);
-                        if now != current {
-                            pending.store(false, Ordering::SeqCst);
-                            status.store(1, Ordering::SeqCst);
-                            return;
-                        }
-                        unsafe {
-                            (*actual_descriptor_guard.data)
-                                .success
-                                .store(true, Ordering::SeqCst);
-                        }
-                        status.store(1, Ordering::SeqCst);
-                        continue;
+                    unsafe {
+                        (*actual_descriptor_guard.data)
+                            .success
+                            .store(true, Ordering::SeqCst);
                     }
-                    _ => unreachable!(),
-                },
+                    Self::insert_head(next, current);
+                    head_ptr.compare_exchange(current, next, Ordering::SeqCst, Ordering::SeqCst);
+                    pending.store(false, Ordering::SeqCst);
+                    return;
+                }
                 false => return,
             }
         }
@@ -407,11 +387,14 @@ impl<T> LinkedList<T> {
     }
 
     pub(crate) fn delete(&self) -> Option<T> {
+        /*println!(
+            "delete call initiated from {:?}",
+            std::thread::current().id()
+        );*/
         loop {
             let mut current_node_holder = HazPtrHolder::default();
             let mut current_node_guard = unsafe { current_node_holder.load(&self.tail) };
             if current_node_guard.is_none() {
-                //println!("should not be printed for the current test case");
                 return None;
             }
             let mut actual_current_node_guard = current_node_guard.expect("Has to be there");
@@ -420,7 +403,6 @@ impl<T> LinkedList<T> {
                 actual_current_node_guard.data,
                 AtomicBool::new(false),
                 std::ptr::null_mut(),
-                AtomicUsize::new(0),
                 AtomicBool::new(true),
                 Operation::Delete,
                 &DELETER1,
@@ -448,7 +430,6 @@ impl<T> LinkedList<T> {
                 {
                     self.loop_delete(&atomicptr);
                     if unsafe { (*new_descriptor_guard.data).success.load(Ordering::SeqCst) } {
-                        //redundant?
                         if unsafe {
                             (*new_descriptor_guard.data)
                                 .init_stored
@@ -470,6 +451,7 @@ impl<T> LinkedList<T> {
                             std::mem::drop(new_descriptor_guard);
                             std::mem::drop(actual_current_node_guard);
                             HazPtrHolder::try_reclaim();
+                            //println!("before returning none on first try");
                             return None;
                         }
                     } else {
@@ -488,13 +470,13 @@ impl<T> LinkedList<T> {
                     let mut new_guard =
                         unsafe { new_holder.load(&atomicptr).expect("Has to be there") };
                     if unsafe { !(*thing.data).pending.load(Ordering::SeqCst) } {
-                        println!("before descriptor CAS");
+                        //println!("before descriptor CAS");
                         if self
                             .descriptor
                             .compare_exchange(thing.data, new, Ordering::SeqCst, Ordering::SeqCst)
                             .is_ok()
                         {
-                            println!("After descriptor CAS");
+                            // println!("After descriptor CAS");
                             self.loop_delete(&atomicptr);
                             let mut swap_holder = HazPtrHolder::default();
                             let mut wrapper = unsafe {
@@ -532,16 +514,17 @@ impl<T> LinkedList<T> {
                                     std::mem::drop(descriptor_guard);
                                     std::mem::drop(actual_current_node_guard);
                                     HazPtrHolder::try_reclaim();
-                                    println!("before returning");
+                                    //println!("before returning");
                                     return Some(*taken_value);
                                 } else {
                                     std::mem::drop(new_guard);
                                     std::mem::drop(descriptor_guard);
                                     std::mem::drop(actual_current_node_guard);
+                                    //println!("before returning None");
                                     return None;
                                 }
                             } else {
-                                println!("going back around");
+                                //println!("going back around");
                                 std::mem::drop(new_guard);
                                 std::mem::drop(descriptor_guard);
                                 std::mem::drop(actual_current_node_guard);
@@ -581,7 +564,6 @@ impl<T> LinkedList<T> {
         let actual_descriptor_guard = descriptor_guard.expect("Has to be there");
         let tail_ptr = &self.tail;
         let mut tail_ptr_holder = HazPtrHolder::default();
-        // load the current from the descriptor and not directly from the pointer
         let mut tail_ptr_guard = unsafe {
             tail_ptr_holder.load(&AtomicPtr::new((*actual_descriptor_guard.data).current))
         };
@@ -590,11 +572,6 @@ impl<T> LinkedList<T> {
                 (*actual_descriptor_guard.data)
                     .pending
                     .store(false, Ordering::SeqCst);
-            }
-            unsafe {
-                (*actual_descriptor_guard.data)
-                    .status
-                    .store(2, Ordering::SeqCst);
             }
             return;
         }
@@ -623,16 +600,10 @@ impl<T> LinkedList<T> {
                     .pending
                     .store(false, Ordering::SeqCst);
             }
-            unsafe {
-                (*actual_descriptor_guard.data)
-                    .status
-                    .store(2, Ordering::SeqCst);
-            }
             return;
         }
         //println!("hg");
         let pending = unsafe { &(*actual_descriptor_guard.data).pending };
-        let status = unsafe { &(*actual_descriptor_guard.data).status };
         // the logic behind aba prevention and prevention of list structure corruption is as
         // follows: assuming the possibility of ABA as in before we load the current pointer into a
         // hazard pointer assume it was dropped and some other memory was allocated at the same
@@ -646,91 +617,75 @@ impl<T> LinkedList<T> {
         // pointer and thus the possibility of it being dropped and another memory getting
         // allocated at its place does not exist
         loop {
-            println!("looping delete");
+            //println!("looping delete");
             match pending.load(Ordering::SeqCst) {
-                true => match status.load(Ordering::SeqCst) {
-                    2 => {
-                        //println!("reached 2");
-                        unsafe {
-                            (*actual_descriptor_guard.data)
-                                .success
-                                .store(true, Ordering::SeqCst)
-                        }
-                        tail_ptr.compare_exchange(
+                true => {
+                    //println!("reached 0");
+                    let current = tail_ptr.load(Ordering::SeqCst);
+                    // the idea is to make the swapping of the tail_ptr the last step
+                    // therefore... helper threads will help when required and will just
+                    // instantly return when helping is not required or when pointer that we
+                    // expected to be stored into the tail_ptr is not actually there
+                    //println!("0");
+                    if current != actual_tail_ptr_guard.data {
+                        pending.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                    if prev.is_null() {
+                        head_ptr.compare_exchange(
                             actual_tail_ptr_guard.data,
-                            prev,
+                            std::ptr::null_mut(),
                             Ordering::SeqCst,
                             Ordering::SeqCst,
                         );
-                        println!("before setting to false");
-                        pending.store(false, Ordering::SeqCst);
-                        println!("after setting to false");
-                        if unsafe {
-                            (*actual_tail_ptr_guard)
-                                .retired
-                                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                                .is_ok()
-                        } {
-                            let mut hazholder = HazPtrHolder::default();
-                            let mut wrapper = unsafe {
-                                hazholder.swap(
-                                    &AtomicPtr::new(actual_tail_ptr_guard.data),
-                                    std::ptr::null_mut(),
-                                    &DELETER1,
-                                )
-                            };
-                            if let Some(mut wrapper) = wrapper {
-                                wrapper.retire();
-                            }
-                        }
-                        return;
                     }
-                    1 => {
-                        //println!("reached 1");
-                        let taken_value =
-                            unsafe { std::ptr::read(&(*actual_tail_ptr_guard.data).value) };
-                        let mut init = MaybeUninit::uninit();
-                        unsafe { init.write(taken_value) };
-                        let init_ptr = Box::into_raw(Box::new(init));
-                        unsafe {
-                            (*actual_descriptor_guard.data)
-                                .taken_value
-                                .store(init_ptr, Ordering::SeqCst);
-                            (*actual_descriptor_guard.data)
-                                .init_stored
-                                .store(true, Ordering::SeqCst);
-                        }
-                        status.store(2, Ordering::SeqCst);
-                        continue;
+                    let taken_value =
+                        unsafe { std::ptr::read(&(*actual_tail_ptr_guard.data).value) };
+                    let mut init = MaybeUninit::uninit();
+                    unsafe { init.write(taken_value) };
+                    let init_ptr = Box::into_raw(Box::new(init));
+                    unsafe {
+                        (*actual_descriptor_guard.data)
+                            .taken_value
+                            .store(init_ptr, Ordering::SeqCst);
+                        (*actual_descriptor_guard.data)
+                            .init_stored
+                            .store(true, Ordering::SeqCst);
                     }
-                    0 => {
-                        //println!("reached 0");
-                        let current = tail_ptr.load(Ordering::SeqCst);
-                        // the idea is to make the swapping of the tail_ptr the last step
-                        // therefore... helper threads will help when required and will just
-                        // instantly return when helping is not required or when pointer that we
-                        // expected to be stored into the tail_ptr is not actually there
-                        //println!("0");
-                        if current != actual_tail_ptr_guard.data {
-                            pending.store(false, Ordering::SeqCst);
-                            status.store(2, Ordering::SeqCst);
-                            return;
-                        }
-                        if prev.is_null() {
-                            head_ptr.compare_exchange(
-                                actual_tail_ptr_guard.data,
+                    unsafe {
+                        (*actual_descriptor_guard.data)
+                            .success
+                            .store(true, Ordering::SeqCst)
+                    }
+                    tail_ptr.compare_exchange(
+                        actual_tail_ptr_guard.data,
+                        prev,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    );
+                    //println!("before setting to false");
+                    pending.store(false, Ordering::SeqCst);
+                    //println!("after setting to false");
+                    if unsafe {
+                        (*actual_tail_ptr_guard)
+                            .retired
+                            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                    } {
+                        let mut hazholder = HazPtrHolder::default();
+                        let mut wrapper = unsafe {
+                            hazholder.swap(
+                                &AtomicPtr::new(actual_tail_ptr_guard.data),
                                 std::ptr::null_mut(),
-                                Ordering::SeqCst,
-                                Ordering::SeqCst,
-                            );
+                                &DELETER1,
+                            )
+                        };
+                        if let Some(mut wrapper) = wrapper {
+                            wrapper.retire();
                         }
-                        //println!("hgswap");
-                        status.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);
-                        //status.store(1, Ordering::SeqCst);
-                        continue;
                     }
-                    _ => unreachable!(),
-                },
+                    return;
+                }
                 false => return,
             }
         }
