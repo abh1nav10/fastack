@@ -67,8 +67,8 @@ impl<T> Drop for Guard<'_, T> {
     fn drop(&mut self) {
         self.hazptr
             .ptr
-            .store(std::ptr::null_mut(), Ordering::SeqCst);
-        self.hazptr.flag.store(true, Ordering::SeqCst);
+            .store(std::ptr::null_mut(), Ordering::Release);
+        self.hazptr.flag.store(true, Ordering::Release);
     }
 }
 
