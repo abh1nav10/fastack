@@ -41,6 +41,7 @@ macro_rules! generate_benchmark {
             let mut group = c.benchmark_group("Bravo");
             group.bench_function("Std", |b| b.iter(|| std_mutex_list($number)));
             group.bench_function("Fastack", |b| b.iter(|| fastack($number)));
+            group.finish();
         }
     };
 }

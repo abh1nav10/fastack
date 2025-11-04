@@ -5,13 +5,13 @@ use std::sync::atomic::Ordering;
 
 static DROPBOX: BoxedPointer = BoxedPointer::new();
 
-pub(crate) struct Node<T> {
-    pub(crate) value: T,
-    pub(crate) next: AtomicPtr<Node<T>>,
+struct Node<T> {
+    value: T,
+    next: AtomicPtr<Node<T>>,
 }
 
 impl<T: Clone> Node<T> {
-    pub(crate) fn new(value: T) -> Self {
+    fn new(value: T) -> Self {
         Self {
             value,
             next: AtomicPtr::new(std::ptr::null_mut()),
@@ -20,7 +20,7 @@ impl<T: Clone> Node<T> {
 }
 
 pub struct Stack<T> {
-    pub(crate) head: AtomicPtr<Node<T>>,
+    head: AtomicPtr<Node<T>>,
     marker: PhantomData<Node<T>>,
 }
 
@@ -29,9 +29,9 @@ unsafe impl<T> Sync for Stack<T> where T: Sync {}
 
 impl<T> Drop for Stack<T> {
     fn drop(&mut self) {
-        let mut current = self.head.load(Ordering::SeqCst);
+        let mut current = self.head.load(Ordering::Acquire);
         while !current.is_null() {
-            let next = unsafe { (*current).next.load(Ordering::SeqCst) };
+            let next = unsafe { (*current).next.load(Ordering::Acquire) };
             let owned = unsafe { Box::from_raw(current) };
             std::mem::drop(owned);
             current = next;
@@ -62,11 +62,11 @@ impl<T: Clone> Stack<T> {
                 std::ptr::null_mut()
             };
             let new_node = Node::new(value.clone());
-            new_node.next.store(current_head, Ordering::SeqCst);
+            new_node.next.store(current_head, Ordering::Release);
             let boxed = Box::into_raw(Box::new(new_node));
             if self
                 .head
-                .compare_exchange(current_head, boxed, Ordering::SeqCst, Ordering::SeqCst)
+                .compare_exchange(current_head, boxed, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
                 Holder::try_reclaim();
@@ -93,13 +93,12 @@ impl<T: Clone> Stack<T> {
                 std::ptr::null_mut()
             };
             if current_head.is_null() {
-                Holder::try_reclaim();
                 return Err("There are no elements in the list");
             }
-            let next_head = unsafe { (*current_head).next.load(Ordering::SeqCst) };
+            let next_head = unsafe { (*current_head).next.load(Ordering::Acquire) };
             if self
                 .head
-                .compare_exchange(current_head, next_head, Ordering::SeqCst, Ordering::SeqCst)
+                .compare_exchange(current_head, next_head, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
                 let value = unsafe { std::ptr::read(&(*current_head).value) };
