@@ -1,12 +1,8 @@
 #![allow(unused)]
 
-// TODO: Fix the orderings, they are definitely wrong as
-// the executor needs to establish a happens before relationship with the operations that
-// happened last time when the task was enqueued.. and thus Ordering::Relaxed won't suffice
-
 use crate::runtime::executor::{COMPLETED, IDLE, Metadata, NOTIFIED, POLLING};
 use crate::runtime::runtime::{Carrier, HIGH_QUEUE};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{Ordering, fence};
 use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 pub(crate) const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop);
@@ -25,7 +21,7 @@ fn wake(data: *const ()) {
         match state.load(Ordering::Relaxed) {
             IDLE => {
                 if state
-                    .compare_exchange(IDLE, POLLING, Ordering::Relaxed, Ordering::Relaxed)
+                    .compare_exchange(IDLE, POLLING, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
                     // Decrementing the refcount is necessary because even though the standard library's
@@ -65,7 +61,7 @@ fn wake(data: *const ()) {
                     // after the task has been completed. It will then decrement the refcount
                     // and if this condition is not checked we will leak the task allocation
                     // if this was the last waker.
-                    if prev == 1 && state.load(Ordering::Relaxed) == COMPLETED {
+                    if prev == 1 && state.load(Ordering::Acquire) == COMPLETED {
                         unsafe { (((*metadata).drop_func)(metadata)) };
                     }
                     break;
@@ -76,12 +72,15 @@ fn wake(data: *const ()) {
                 let prev = refcount.fetch_sub(1, Ordering::Relaxed);
                 // The reason for this check is similar to the reason for the check in POLLING
                 // case.
-                if prev == 1 && state.load(Ordering::Relaxed) == COMPLETED {
+                if prev == 1 && state.load(Ordering::Acquire) == COMPLETED {
                     unsafe { ((*metadata).drop_func)(metadata) };
                 }
                 break;
             }
             COMPLETED => {
+                // The fence ensure that the dropping of the future by the executor
+                // is observed by this thread
+                fence(Ordering::Acquire);
                 let prev = refcount.fetch_sub(1, Ordering::Relaxed);
                 // In this case we have to explicity check for the refcount because no more wakers
                 // are going to be created since the task is completed and this might as well be
@@ -103,7 +102,7 @@ fn wake_by_ref(data: *const ()) {
         match state.load(Ordering::Relaxed) {
             IDLE => {
                 if state
-                    .compare_exchange(IDLE, POLLING, Ordering::Relaxed, Ordering::Relaxed)
+                    .compare_exchange(IDLE, POLLING, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
                 {
                     HIGH_QUEUE.enqueue(Carrier::new(data));
@@ -137,7 +136,7 @@ fn drop(data: *const ()) {
     // executed, the user just drops the other waker, the task will be dropped and when
     // the execute function is called by the executor, it would dereference a dangling pointer
     // and hence cause UB.
-    if prev == 1 && state.load(Ordering::Relaxed) == COMPLETED {
+    if prev == 1 && state.load(Ordering::Acquire) == COMPLETED {
         unsafe { ((*metadata).drop_func)(metadata) };
     }
 }

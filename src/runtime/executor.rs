@@ -112,14 +112,14 @@ where
                 if let Some(ref waker) = *lock {
                     waker.wake_by_ref();
                 }
-                // Ordering has been kept to Relaxed because it is only
-                // the waker which when woken up check the state and
-                // decide what to do.. Since only the state is checked
-                // the wakers need not establish a happens before relationship
-                // with whatever has happened prior to the latest store on the
-                // state variable and hence can load using Ordering::Relaxed and
-                // therefore we have used Ordering::Relaxed in the store.
-                state.store(COMPLETED, Ordering::Relaxed);
+                // We drop the future here itself as it has been polled to completion.
+                unsafe {
+                    *(*task).future.get() = None;
+                }
+                // Since the wakers might drop the task after seeing the state
+                // as COMPLETED, the dropping of the future must be visible to them
+                // and hence we need to make the Ordering Release
+                state.store(COMPLETED, Ordering::Release);
             } else {
                 loop {
                     match state.load(Ordering::Relaxed) {
@@ -128,7 +128,7 @@ where
                                 .compare_exchange(
                                     POLLING,
                                     IDLE,
-                                    Ordering::Relaxed,
+                                    Ordering::Release,
                                     Ordering::Relaxed,
                                 )
                                 .is_ok()
@@ -137,6 +137,13 @@ where
                             }
                         }
                         NOTIFIED => {
+                            // We do not need to use RELEASE ordering here as
+                            // the state is just changed from NOTIFIED to POLLING
+                            // and the wakers also do not enqueue but instead
+                            // change the state from POLLING to NOTIFIED ...
+                            // Only when they change the state from IDLE to POLLING do
+                            // they enqueue and only in that case do we need to establish
+                            // a happens before relationship
                             state.store(POLLING, Ordering::Relaxed);
                             unsafe { ((*meta).func)(metadata) };
                             break;

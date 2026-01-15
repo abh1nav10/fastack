@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 // TODO:
-//   Tie to queues with the lifetime of the runtimehandle and ensure that an
+//   Tie the queues with the lifetime of the runtimehandle and ensure that an
 //   appropriate error is returned whenever a user tries to spawn a task in
 //   the absense of a working executor
 
